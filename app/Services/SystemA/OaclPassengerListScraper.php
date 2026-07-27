@@ -29,6 +29,13 @@ class OaclPassengerListScraper
         $options = (new ChromeOptions)->addArguments(array_filter([
             '--window-size=1920,1080',
             '--disable-gpu',
+            // Cron-driven runs are typically root, and Chrome refuses to
+            // start as root with its sandbox enabled ("session not created:
+            // Chrome instance exited"). --disable-dev-shm-usage avoids a
+            // separate crash on small/minimal VPS instances where /dev/shm
+            // is too small for Chrome's default shared-memory usage.
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
             $this->headless ? '--headless=new' : null,
         ]));
 
