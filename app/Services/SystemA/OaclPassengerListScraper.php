@@ -36,19 +36,15 @@ class OaclPassengerListScraper
         // regardless of which user/environment the process runs under.
         $userDataDir = sys_get_temp_dir() . '/oacl-chrome-' . getmypid() . '-' . bin2hex(random_bytes(4));
 
-        $options = (new ChromeOptions)->addArguments(array_filter([
-            '--window-size=1920,1080',
-            '--disable-gpu',
-            '--user-data-dir=' . $userDataDir,
-            // Cron-driven runs are typically root, and Chrome refuses to
-            // start as root with its sandbox enabled ("session not created:
-            // Chrome instance exited"). --disable-dev-shm-usage avoids a
-            // separate crash on small/minimal VPS instances where /dev/shm
-            // is too small for Chrome's default shared-memory usage.
-            '--no-sandbox',
-            '--disable-dev-shm-usage',
-            $this->headless ? '--headless=new' : null,
-        ]));
+
+        $options = (new ChromeOptions)
+    ->setBinary('/usr/bin/google-chrome')
+    ->addArguments([
+        '--headless=new',
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--window-size=1920,1080',
+    ]);
 
         $this->driver = RemoteWebDriver::create(
             config('systema.driver_url', 'http://localhost:9515'),
