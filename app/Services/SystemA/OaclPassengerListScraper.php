@@ -26,25 +26,11 @@ class OaclPassengerListScraper
 
     public function start(): void
     {
-        // Chrome falls back to $HOME (e.g. ~/.local/share/...) for its
-        // profile/cache dirs. Service users like www-data commonly have a
-        // $HOME that isn't writable by them, so Chrome can't create its
-        // profile dir and exits immediately ("Trace/breakpoint trap") the
-        // moment ChromeDriver launches it as that user — even though the
-        // same binary launches fine interactively as a normal login user.
-        // A unique, definitely-writable --user-data-dir avoids this
-        // regardless of which user/environment the process runs under.
-        $userDataDir = sys_get_temp_dir() . '/oacl-chrome-' . getmypid() . '-' . bin2hex(random_bytes(4));
-
-
-        $options = (new ChromeOptions)
-    ->setBinary('/usr/bin/google-chrome')
-    ->addArguments([
-        '--headless=new',
-        '--no-sandbox',
-        '--disable-dev-shm-usage',
-        '--window-size=1920,1080',
-    ]);
+        $options = (new ChromeOptions)->addArguments(array_filter([
+            '--window-size=1920,1080',
+            '--disable-gpu',
+            $this->headless ? '--headless=new' : null,
+        ]));
 
         $this->driver = RemoteWebDriver::create(
             config('systema.driver_url', 'http://localhost:9515'),
