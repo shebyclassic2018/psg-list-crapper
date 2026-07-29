@@ -15,12 +15,18 @@ use Illuminate\Support\Facades\Log;
 use Throwable;
 
 #[Signature('app:watch-departures')]
-#[Description('Every minute: upload each due bus\'s passenger list 10 minutes before and 10 minutes after its departure, retrying failed attempts until 30 minutes past departure.')]
+#[Description('Every minute: upload each due bus\'s passenger list a per-tenant number of minutes before and after its departure, retrying failed attempts until 30 minutes past departure.')]
 class WatchDepartures extends Command
 {
     protected const RETRY_CUTOFF_MINUTES = 30;
 
-    protected const WATCH_TIME = 10;
+    /**
+     * Fallback before/after windows (minutes) for tenants that haven't
+     * configured their own via oacl_credentials.before_minutes/after_minutes.
+     */
+    protected const DEFAULT_BEFORE_MINUTES = 10;
+
+    protected const DEFAULT_AFTER_MINUTES = 10;
 
     protected const SLOT_BEFORE = 'before';
 
@@ -30,16 +36,18 @@ class WatchDepartures extends Command
     {
         $now = Carbon::now();
 
-        $due = $this->dueDepartures($now);
+        // The before/after window is per-tenant (companies.oacl_credentials),
+        // so candidates must be widened enough to cover the largest possible
+        // configured window, then filtered per-tenant once we know each
+        // tenant's actual minutes below.
+        $candidates = $this->candidateDepartures($now);
 
-        if ($due->isEmpty()) {
+        if ($candidates->isEmpty()) {
             $this->line('No departures due for upload right now.');
             Log::info("No departures due for upload right now.");
 
             return self::SUCCESS;
         }
-
-        $this->info("Processing {$due->count()} due departure slot(s).");
 
         $platform = new PlatformClient(
             apexBaseUrl: config('systemb.apex_base_url'),
@@ -47,32 +55,48 @@ class WatchDepartures extends Command
             password: config('systemb.platform_admin_password'),
         );
 
-        foreach ($due->groupBy(fn ($item) => $item['departure']->tenant_slug) as $tenantSlug => $departures) {
-            $this->processTenant($platform, $tenantSlug, $departures);
+        $totalDue = 0;
+
+        foreach ($candidates->groupBy('tenant_slug') as $tenantSlug => $departures) {
+            $totalDue += $this->processTenant($platform, $tenantSlug, $departures, $now);
+        }
+
+        if ($totalDue === 0) {
+            $this->line('No departures due for upload right now.');
+            Log::info("No departures due for upload right now.");
         }
 
         return self::SUCCESS;
     }
 
     /**
-     * @return Collection<int, array{departure: ScrapedDeparture, slot: string}>
+     * Every ScrapedDeparture that could plausibly still need a before/after
+     * upload, regardless of tenant — the per-tenant before/after minutes are
+     * only known once we fetch that tenant's credentials in processTenant(),
+     * so this cast a wide net using the larger of the two defaults/cutoff.
      */
-    protected function dueDepartures(Carbon $now): Collection
+    protected function candidateDepartures(Carbon $now): Collection
     {
         $cutoff = $now->copy()->subMinutes(self::RETRY_CUTOFF_MINUTES);
 
-        $candidates = ScrapedDeparture::where('departure_at', '>=', $cutoff)
+        return ScrapedDeparture::where('departure_at', '>=', $cutoff)
             ->where(function ($q) {
                 $q->where('upload_before_status', '!=', ScrapedDeparture::STATUS_SUCCESS)
                     ->orWhere('upload_after_status', '!=', ScrapedDeparture::STATUS_SUCCESS);
             })
             ->get();
+    }
 
+    /**
+     * @return Collection<int, array{departure: ScrapedDeparture, slot: string}>
+     */
+    protected function dueDepartures(Collection $departures, Carbon $now, int $beforeMinutes, int $afterMinutes): Collection
+    {
         $due = collect();
 
-        foreach ($candidates as $departure) {
-            $beforeAt = $departure->departure_at->copy()->subMinutes(self::WATCH_TIME);
-            $afterAt = $departure->departure_at->copy()->addMinutes(self::WATCH_TIME);
+        foreach ($departures as $departure) {
+            $beforeAt = $departure->departure_at->copy()->subMinutes($beforeMinutes);
+            $afterAt = $departure->departure_at->copy()->addMinutes($afterMinutes);
             $retryDeadline = $departure->departure_at->copy()->addMinutes(self::RETRY_CUTOFF_MINUTES);
 
             if ($now->lt($retryDeadline)) {
@@ -90,27 +114,39 @@ class WatchDepartures extends Command
     }
 
     /**
-     * @param  Collection<int, array{departure: ScrapedDeparture, slot: string}>  $due
+     * @param  Collection<int, ScrapedDeparture>  $departures  Candidate departures for this tenant (not yet filtered to due slots).
+     * @return int Number of due slots processed.
      */
-    protected function processTenant(PlatformClient $platform, string $tenantSlug, Collection $due): void
+    protected function processTenant(PlatformClient $platform, string $tenantSlug, Collection $departures, Carbon $now): int
     {
         // All ScrapedDeparture rows for a tenant came from the same company,
         // but we only stored the slug — look the company id up once here.
         $company = collect($platform->companies())->firstWhere('slug', $tenantSlug);
 
         if ($company === null) {
-            $this->error("Tenant {$tenantSlug}: company not found via apex, skipping {$due->count()} slot(s).");
+            $this->error("Tenant {$tenantSlug}: company not found via apex, skipping.");
 
-            return;
+            return 0;
         }
 
         $credentials = $platform->revealOaclCredentials($company['id']);
 
         if ($credentials === null || empty($credentials['tenant_username']) || empty($credentials['tenant_password'])) {
-            $this->error("Tenant {$tenantSlug}: missing System A or tenant-user credentials, skipping {$due->count()} slot(s).");
+            $this->error("Tenant {$tenantSlug}: missing System A or tenant-user credentials, skipping.");
 
-            return;
+            return 0;
         }
+
+        $beforeMinutes = $credentials['before_minutes'] ?? self::DEFAULT_BEFORE_MINUTES;
+        $afterMinutes = $credentials['after_minutes'] ?? self::DEFAULT_AFTER_MINUTES;
+
+        $due = $this->dueDepartures($departures, $now, $beforeMinutes, $afterMinutes);
+
+        if ($due->isEmpty()) {
+            return 0;
+        }
+
+        $this->info("Tenant {$tenantSlug}: processing {$due->count()} due departure slot(s) (before={$beforeMinutes}m, after={$afterMinutes}m).");
 
         $uploader = new PassengerListUploadClient(
             tenantBaseUrl: "{$tenantSlug}.xas.co.tz",
@@ -149,6 +185,8 @@ class WatchDepartures extends Command
         } finally {
             $scraper->stop();
         }
+
+        return $due->count();
     }
 
     protected function processSlot(

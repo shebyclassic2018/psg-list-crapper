@@ -67,7 +67,7 @@ class PlatformClient
     }
 
     /**
-     * @return array{username: string, password: string, tenant_username: ?string, tenant_password: ?string}|null
+     * @return array{username: string, password: string, tenant_username: ?string, tenant_password: ?string, before_minutes: ?int, after_minutes: ?int}|null
      */
     public function revealOaclCredentials(int $companyId): ?array
     {
@@ -86,6 +86,8 @@ class PlatformClient
             'password' => $response->json('password'),
             'tenant_username' => $response->json('tenant_username'),
             'tenant_password' => $response->json('tenant_password'),
+            'before_minutes' => $response->json('before_minutes'),
+            'after_minutes' => $response->json('after_minutes'),
         ];
     }
 
