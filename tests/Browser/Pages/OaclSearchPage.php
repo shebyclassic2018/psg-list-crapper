@@ -216,6 +216,52 @@ class OaclSearchPage extends Page
     }
 
     /**
+     * The plate shown directly on the row itself (e.g. "BM COACH ... <br>
+     * Plate no. [T 105 EEN]") — the plate this row is actually listed under,
+     * as opposed to whichever option the #pltno dropdown defaults to after
+     * clicking the row (some buses have multiple plates on file, and the
+     * dropdown's default selection is not necessarily this one — uploading
+     * with the wrong plate produces a PDF System B rejects as "not
+     * registered on this tenant").
+     */
+    public function rowPlateFor(Browser $browser, int $rowIndex): ?string
+    {
+        $cellText = $browser->driver->executeScript(
+            'var tr = document.getElementById(arguments[0]); return tr ? tr.children[1].textContent : null;',
+            ['tr' . $rowIndex]
+        );
+
+        if ($cellText === null || ! preg_match('/Plate no\.\s*\[\s*([^\]]+?)\s*\]/i', $cellText, $m)) {
+            return null;
+        }
+
+        return trim($m[1]);
+    }
+
+    /**
+     * Select the #pltno option matching the row's own displayed plate
+     * (see rowPlateFor). Returns false if the dropdown has no option for
+     * that plate — the row click still populated #pltno with whatever
+     * plates OACL has on file for this bus_id, which may not include the
+     * one actually shown on the row.
+     */
+    public function selectRowPlate(Browser $browser, string $plate): bool
+    {
+        $selected = $browser->driver->executeScript(<<<'JS'
+            const needle = arguments[0].trim().toLowerCase();
+            const sel = document.getElementById('pltno');
+            if (!sel) return false;
+            const option = Array.from(sel.options).find(o => o.textContent.trim().toLowerCase() === needle);
+            if (!option) return false;
+            sel.value = option.value;
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+        JS, [$plate]);
+
+        return (bool) $selected;
+    }
+
+    /**
      * Find the row index (1-indexed) whose bus_id matches, re-scanning the
      * currently rendered results table — used when re-targeting a specific
      * bus on a fresh search rather than trusting a previously seen row
@@ -239,15 +285,33 @@ class OaclSearchPage extends Page
      * "Get Passenger List". The PDF opens in a NEW browser tab/window (after
      * a JS confirm() dialog), so we switch to it, read its URL, then close
      * it and switch back to the results page for the next row.
+     *
+     * Before submitting, the #pltno dropdown (populated on row click from
+     * that bus's plts_N list, may contain multiple plates for one bus_id) is
+     * forced to match the plate actually displayed on the row — OACL
+     * defaults it to whichever plate is first in that list, which is not
+     * necessarily the one shown, and generates the PDF using whatever is
+     * currently selected. Uploading a PDF generated against the wrong plate
+     * fails System B's import with "not registered on this tenant".
+     *
+     * @throws \RuntimeException if the row's displayed plate has no
+     *   matching #pltno option — the caller should treat this the same as
+     *   System B's "not registered" rejection rather than attempt upload.
      */
     public function fetchPassengerListUrl(Browser $browser, int $rowIndex): string
     {
         $driver = $browser->driver;
         $originalWindow = $driver->getWindowHandle();
 
-        $browser->click('#tr' . $rowIndex)
-            ->pause(300)
-            ->click('#btn_save')
+        $browser->click('#tr' . $rowIndex)->pause(300);
+
+        $plate = $this->rowPlateFor($browser, $rowIndex);
+
+        if ($plate !== null && ! $this->selectRowPlate($browser, $plate)) {
+            throw new \RuntimeException("Row {$rowIndex}: no plate-dropdown option matches the row's displayed plate \"{$plate}\" — bus is not registered under this plate.");
+        }
+
+        $browser->click('#btn_save')
             ->waitForDialog(5)
             ->acceptDialog()
             ->pause(1000);

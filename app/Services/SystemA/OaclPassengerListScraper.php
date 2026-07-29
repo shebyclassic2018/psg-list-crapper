@@ -128,7 +128,17 @@ class OaclPassengerListScraper
     public function downloadPassengerListPdf(int $rowIndex): ?string
     {
         $page = new OaclSearchPage;
-        $pdfUrl = $page->fetchPassengerListUrl($this->browser, $rowIndex);
+
+        try {
+            $pdfUrl = $page->fetchPassengerListUrl($this->browser, $rowIndex);
+        } catch (\RuntimeException $e) {
+            Log::warning('OACL scraper: row plate not selectable, skipping', [
+                'row' => $rowIndex,
+                'reason' => $e->getMessage(),
+            ]);
+
+            return null;
+        }
 
         if (! str_contains($pdfUrl, 'get_passenger_list.php')) {
             Log::warning('OACL scraper: unexpected navigation URL after Get Passenger List', [
