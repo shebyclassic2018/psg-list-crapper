@@ -13,6 +13,7 @@ use RuntimeException;
  * credentials. Distinct from PassengerListUploadClient, which logs in as
  * a normal tenant user against one specific tenant subdomain.
  */
+
 class PlatformClient
 {
     protected ?string $token = null;
